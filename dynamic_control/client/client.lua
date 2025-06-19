@@ -1,108 +1,94 @@
-local dynamic = exports["legacydmc_dynamic"]
 local QBCore = exports['qb-core']:GetCoreObject()
+local dynamic = exports["legacydmc_dynamic"]
+local currentVehicle = nil
+local escState = false
+local tcsState = false
 
-local DEBUG = true
-local lastVehicle = nil
-local escOverrideByPlate = {}
-local tcsOverrideByPlate = {}
-local isOwnedVehicle = false
+local systemHandlers = {
+    ESC = dynamic.toggleEsc,
+    TCS = dynamic.toggleTcs
+}
 
-local function debugPrint(msg)
-    if DEBUG then print("[ESC/TCS] " .. msg) end
+local function getVehicleModel(vehicle)
+    return GetDisplayNameFromVehicleModel(GetEntityModel(vehicle)):lower()
 end
 
-local function getPlate(veh)
-    return string.gsub(GetVehicleNumberPlateText(veh), "%s+", "")
+local function supportsSystem(model, system)
+    return Config.VehicleSystems[model] and Config.VehicleSystems[model][system]
 end
 
-local function notifyESC(state)
-    local msg = state and "ESC Enabled" or "ESC Disabled"
+local function toggleSystem(system, state)
+    local handler = systemHandlers[system]
+    if handler then
+        handler(state)
+    else
+        print(("[WARNING] No toggle function for system: %s"):format(system))
+    end
+end
+
+local function notifySystem(system, state, prefix)
+    local name = system:upper()
     local type = state and "success" or "error"
+    local status = state and "Enabled" or "Disabled"
+    local msg = string.format("%s%s %s", prefix or "", name, status)
     QBCore.Functions.Notify(msg, type)
 end
 
-local function notifyTCS(state)
-    local msg = state and "TCS Enabled" or "TCS Disabled"
-    local type = state and "success" or "error"
-    QBCore.Functions.Notify(msg, type)
-end
+AddEventHandler("baseevents:enteredVehicle", function(veh, seat, model)
+    if seat ~= -1 then return end
 
-AddEventHandler("onClientResourceStart", function(resource)
-    if resource == "legacydmc_dynamic" then
-        local ped = PlayerPedId()
-        if IsPedInAnyVehicle(ped, false) then
-            local veh = GetVehiclePedIsIn(ped, false)
-            local plate = getPlate(veh)
-            local model = GetDisplayNameFromVehicleModel(GetEntityModel(veh)):lower()
-            debugPrint("[Restart Detected] Re-requesting ESC/TCS state for: " .. plate)
-            TriggerServerEvent("vehicleSystems:requestState", plate, model)
-        end
+    currentVehicle = veh
+    local modelName = getVehicleModel(veh)
+
+    if supportsSystem(modelName, "ESC") then
+        escState = true
+        toggleSystem("ESC", true)
+        notifySystem("ESC", true, "(Auto) ")
+    else
+        escState = false
     end
+
+    if supportsSystem(modelName, "TCS") then
+        tcsState = true
+        toggleSystem("TCS", true)
+        notifySystem("TCS", true, "(Auto) ")
+    else
+        tcsState = false
+    end
+
+    print(("[DEBUG] Vehicle: %s | ESC: %s | TCS: %s"):format(modelName, tostring(escState), tostring(tcsState)))
 end)
 
-RegisterNetEvent("vehicleSystems:applyState", function(esc, tcs, owned)
-    isOwnedVehicle = owned
-    debugPrint("Server sent ESC: " .. tostring(esc) .. ", TCS: " .. tostring(tcs) .. ", Owned: " .. tostring(owned))
-
-    if esc then dynamic:toggleEsc() end
-    if tcs then dynamic:toggleTcs() end
+AddEventHandler("baseevents:leftVehicle", function()
+    currentVehicle = nil
 end)
 
-CreateThread(function()
-    debugPrint("Vehicle monitor thread started.")
+RegisterCommand("toggleesc", function()
+    if not currentVehicle then return QBCore.Functions.Notify("ESC unavailable (no vehicle)", "error") end
 
-    while true do
-        Wait(500)
-
-        local ped = PlayerPedId()
-        if IsPedInAnyVehicle(ped, false) then
-            local veh = GetVehiclePedIsIn(ped, false)
-
-            if veh ~= lastVehicle then
-                lastVehicle = veh
-                local plate = getPlate(veh)
-
-                debugPrint("Entered vehicle with plate: " .. plate)
-                local model = GetDisplayNameFromVehicleModel(GetEntityModel(veh)):lower()
-                TriggerServerEvent("vehicleSystems:requestState", plate, model)
-            end
-        else
-            if lastVehicle then debugPrint("Exited vehicle.") end
-            lastVehicle = nil
-        end
+    local modelName = getVehicleModel(currentVehicle)
+    if not supportsSystem(modelName, "ESC") then
+        return QBCore.Functions.Notify("This vehicle doesn't support ESC.", "error")
     end
-end)
 
-RegisterCommand("esc", function()
-    local ped = PlayerPedId()
-    if not IsPedInAnyVehicle(ped, false) then return end
-
-    local veh = GetVehiclePedIsIn(ped, false)
-    local plate = getPlate(veh)
-
-    local newState = dynamic:toggleEsc()
-    escOverrideByPlate[plate] = newState
-    notifyESC(newState)
-
-    if isOwnedVehicle then
-        TriggerServerEvent("vehicleSystems:setESC", plate, newState)
-    end
+    escState = not escState
+    toggleSystem("ESC", escState)
+    notifySystem("ESC", escState)
 end, false)
-RegisterKeyMapping('esc', 'Toggle ESC', 'keyboard', 'LBRACKET')
 
-RegisterCommand("tcs", function()
-    local ped = PlayerPedId()
-    if not IsPedInAnyVehicle(ped, false) then return end
+RegisterKeyMapping("toggleesc", "Toggle ESC", "keyboard", "LBRACKET")
 
-    local veh = GetVehiclePedIsIn(ped, false)
-    local plate = getPlate(veh)
+RegisterCommand("toggletcs", function()
+    if not currentVehicle then return QBCore.Functions.Notify("TCS unavailable (no vehicle)", "error") end
 
-    local newState = dynamic:toggleTcs()
-    tcsOverrideByPlate[plate] = newState
-    notifyTCS(newState)
-
-    if isOwnedVehicle then
-        TriggerServerEvent("vehicleSystems:setTCS", plate, newState)
+    local modelName = getVehicleModel(currentVehicle)
+    if not supportsSystem(modelName, "TCS") then
+        return QBCore.Functions.Notify("This vehicle doesn't support TCS.", "error")
     end
+
+    tcsState = not tcsState
+    toggleSystem("TCS", tcsState)
+    notifySystem("TCS", tcsState)
 end, false)
-RegisterKeyMapping('tcs', 'Toggle TCS', 'keyboard', 'RBRACKET')
+
+RegisterKeyMapping("toggletcs", "Toggle TCS", "keyboard", "RBRACKET")
